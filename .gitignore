@@ -1,0 +1,4 @@
+.cache_wayback/
+__pycache__/
+.pytest_cache/
+*.xlsx
