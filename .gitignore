@@ -2,3 +2,4 @@
 __pycache__/
 .pytest_cache/
 *.xlsx
+run_log*.txt
