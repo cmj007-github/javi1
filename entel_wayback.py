@@ -112,10 +112,27 @@ UNLIMITED_MIN_RE = re.compile(r"min(?:utos)?\s*(libres?|ilimitad[oa]s?)|(libres?
 SMS_RE = re.compile(r"(\d[\d.]*)\s*SMS\b", re.I)
 UNLIMITED_SMS_RE = re.compile(r"SMS\s*(libres?|ilimitad[oa]s?)|(libres?|ilimitad[oa]s?)\s*SMS", re.I)
 PLAN_NAME_RE = re.compile(r"\b(Plan\s+[A-Za-zÁÉÍÓÚáéíóúñÑ0-9+\-. ]{1,40}?)(?=\s*(?:\$|\d+\s*GB|Libre|Ilimitad|$|\n))", re.I)
+# "Plan 18 GB", "Plan Controlado 25 GB": se prueba antes que PLAN_NAME_RE, que cortaba "Plan 18 GB" en "Plan 1"
+PLAN_GB_NAME_RE = re.compile(r"\bplan\s+((?:[A-Za-zÁÉÍÓÚáéíóúñÑ]+\s+){0,3}?)(\d+(?:[.,]\d+)?)\s*(GB|MB)\b", re.I)
+NAME_STOPWORDS = {"de", "del", "desde", "con", "y", "un", "una", "el", "la", "que", "para", "por", "a"}
+BAD_NAME_RE = re.compile(r"^plan\s+(de|desde|con|que|para|del|y|contratado)\b", re.I)
 SOCIAL = ["WhatsApp", "Facebook", "Instagram", "Twitter", "TikTok", "Waze", "Spotify", "Netflix", "YouTube", "Messenger"]
 ROAMING_RE = re.compile(r"roaming", re.I)
 DISCOUNT_RE = re.compile(r"(\d{1,2})\s*%\s*(?:dcto|desc(?:uento)?|off)", re.I)
 MONTHS_RE = re.compile(r"(?:por|durante)\s+(\d{1,2})\s+mes", re.I)
+
+# Textos que tienen precio y GB pero no son planes móviles (teléfonos, hogar, prepago, letra chica)
+PHONE_RE = re.compile(r"iphone|samsung|galaxy|motorola|huawei|xiaomi|redmi|nokia|lg\s?k\d|alcatel|precio (?:de )?venta|smartphone|smartwatch|tablet|ipad", re.I)
+PLAN_WORDS_RE = re.compile(r"habla|minutos|\bmin\b|sms|cargo fijo|navega|gigas libres|cuota de datos|/mes", re.I)
+STORAGE_GB = {16, 32, 64, 128, 256, 512}
+FIJA_RE = re.compile(r"telefon[ií]a fija", re.I)
+HOGAR_RE = re.compile(r"fibra|hogar|televisi|\bTV\b|banda ancha|sim[eé]tric|mb de velocidad|internet fijo", re.I)
+MOVIL_RE = re.compile(r"m[oó]vil|habla|sms", re.I)
+PREPAGO_RE = re.compile(r"prepago|recarga|vigencia", re.I)
+POSTPAGO_RE = re.compile(r"cargo fijo|plan controlado|plan libre", re.I)
+LEGAL_RE = re.compile(r"planes? adicionales|bajo el mismo rut|que se encuentren", re.I)
+# Precios de teléfonos o cuotas que aparecen junto a un plan y no son el precio del plan
+NON_PLAN_PRICE_RE = re.compile(r"(?:cuotas?\s+(?:inicial|sin inter[eé]s)|\d+\s+cuotas|precio\s+(?:de\s+)?venta|valor\s+(?:del\s+)?equipo)[^$]{0,40}$", re.I)
 
 
 def parse_price(s: str) -> int:
@@ -145,27 +162,65 @@ class Plan:
     meses_promocion: int | None = None
     texto_bruto: str = ""
     metodo: str = "html"
+    advertencias: str = ""
 
 
 def _normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def exclusion_reason(t: str) -> str | None:
+    """Motivo por el que un texto con precio no es un plan móvil, o None si parece plan."""
+    if PHONE_RE.search(t):
+        gb = GB_RE.search(t)
+        storage = gb and gb.group(2).upper() != "MB" and float(gb.group(1).replace(",", ".")) in STORAGE_GB
+        if not PLAN_WORDS_RE.search(t) or (storage and not PLAN_GB_NAME_RE.search(t)):
+            return "teléfono"
+    if FIJA_RE.search(t) or (HOGAR_RE.search(t) and not MOVIL_RE.search(t)):
+        return "hogar/TV/telefonía fija"
+    if PREPAGO_RE.search(t) and not POSTPAGO_RE.search(t):
+        return "prepago/recarga"
+    if LEGAL_RE.search(t):
+        return "letra chica"
+    return None
+
+
+def plan_name(t: str) -> str:
+    m = PLAN_GB_NAME_RE.search(t)
+    if m:
+        words = [w for w in m.group(1).split() if w.lower() not in NAME_STOPWORDS]
+        return " ".join(["Plan", *words, f"{m.group(2)} {m.group(3).upper()}"])
+    m = PLAN_NAME_RE.search(t)
+    if m and not BAD_NAME_RE.match(m.group(1)):
+        return "Plan" + _normalize_ws(m.group(1))[4:]
+    return ""
+
+
 def plan_from_text(text: str, metodo: str = "html") -> Plan | None:
     t = _normalize_ws(text)
-    prices = [parse_price(m.group(1)) for m in PRICE_RE.finditer(t)]
+    prices = [parse_price(m.group(1)) for m in PRICE_RE.finditer(t)
+              if not NON_PLAN_PRICE_RE.search(t[max(0, m.start() - 80):m.start()])]
     prices = [p for p in prices if plausible_price(p)]
     gb = GB_RE.search(t)
     unl_data = bool(UNLIMITED_DATA_RE.search(t))
-    if not prices or not (gb or unl_data or MIN_RE.search(t)):
+    if not prices or not (gb or unl_data or MIN_RE.search(t)) or exclusion_reason(t):
         return None
 
     p = Plan(metodo=metodo, texto_bruto=t[:500])
+    warnings = []
     p.todos_los_precios = "; ".join(f"{x:,}".replace(",", ".") for x in prices)
     # Si hay dos precios, el menor suele ser el de oferta y el mayor el normal ("antes").
     p.precio_clp = min(prices)
     if len(set(prices)) > 1:
-        p.precio_normal_clp = max(prices)
+        if max(prices) > 2.5 * p.precio_clp:
+            warnings.append("precio normal descartado (muy distinto al precio)")
+        else:
+            p.precio_normal_clp = max(prices)
+    if len(PLAN_GB_NAME_RE.findall(t)) >= 3 or len(prices) >= 4:
+        warnings.append("varios planes en el mismo texto")
+    if p.precio_clp < 3_000 or p.precio_clp > 80_000:
+        warnings.append("precio fuera de rango típico")
+    p.advertencias = "; ".join(warnings)
 
     if gb:
         val = float(gb.group(1).replace(",", "."))
@@ -194,12 +249,10 @@ def plan_from_text(text: str, metodo: str = "html") -> Plan | None:
     if m:
         p.meses_promocion = int(m.group(1))
 
-    m = PLAN_NAME_RE.search(t)
-    if m:
-        p.nombre = _normalize_ws(m.group(1))
-    elif gb:
+    p.nombre = plan_name(t)
+    if not p.nombre and gb:
         p.nombre = f"Plan {gb.group(1)} {gb.group(2).upper()}"
-    elif unl_data:
+    elif not p.nombre and unl_data:
         p.nombre = "Plan Libre"
     return p
 
@@ -278,6 +331,8 @@ def plans_from_json_scripts(soup: BeautifulSoup) -> list[Plan]:
                 continue
             name = str(next((lower[k] for k in ("name", "nombre", "title", "titulo") if k in lower), ""))
             text = f"{name} ${price_int} " + " ".join(str(v) for v in o.values() if isinstance(v, (str, int, float)))
+            if exclusion_reason(text):
+                continue
             p = plan_from_text(text, metodo="json") or Plan(metodo="json", texto_bruto=text[:500])
             p.precio_clp = price_int
             if name:
@@ -337,6 +392,7 @@ PLAN_COLUMNS = [
     ("descuento_pct", "Descuento %"),
     ("meses_promocion", "Meses promoción"),
     ("metodo", "Método extracción"),
+    ("advertencias", "Advertencias"),
     ("wayback_url", "URL Wayback"),
     ("texto_bruto", "Texto bruto (para revisión)"),
 ]
@@ -369,12 +425,13 @@ def write_excel(rows: list[dict], captures: list[dict], path: str) -> None:
             ("Sí" if r.get(k) is True else "No" if r.get(k) is False else r.get(k))
             for k, _ in PLAN_COLUMNS
         ])
-    widths = [10, 12, 32, 26, 12, 14, 26, 10, 10, 10, 10, 8, 8, 28, 10, 10, 10, 10, 50, 80]
+    widths = [10, 12, 32, 26, 12, 14, 26, 10, 10, 10, 10, 8, 8, 28, 10, 10, 10, 10, 30, 50, 80]
     style_header(ws, widths)
     for col in ("E", "F"):
         for cell in ws[col][1:]:
             cell.number_format = '"$"#,##0'
-    for cell in ws["S"][1:]:
+    url_col = get_column_letter([k for k, _ in PLAN_COLUMNS].index("wayback_url") + 1)
+    for cell in ws[url_col][1:]:
         if cell.value:
             cell.hyperlink = cell.value
             cell.font = Font(color="0563C1", underline="single")
@@ -420,6 +477,9 @@ def write_excel(rows: list[dict], captures: list[dict], path: str) -> None:
         "Extracción heurística: revise la columna 'Texto bruto' para validar casos dudosos.",
         "Precio CLP = menor precio detectado en la tarjeta (usualmente precio oferta). Precio normal = mayor precio si hay más de uno.",
         "Páginas renderizadas solo con JavaScript pueden no traer precios en el HTML archivado; ver hoja Capturas (estado 'sin planes').",
+        "Se omiten teléfonos, internet hogar/TV/telefonía fija, prepago/recargas y letra chica, y los precios de equipos o cuotas.",
+        "Duplicados: si el mismo plan (mes, precio, GB) aparece en varias páginas, se guarda una sola fila.",
+        "Columna Advertencias: filas que conviene revisar (varios planes en un texto, precio normal descartado, precio atípico).",
         f"Generado: {dt.datetime.now():%Y-%m-%d %H:%M}",
     ]
     for n in notas:
@@ -435,6 +495,10 @@ def write_excel(rows: list[dict], captures: list[dict], path: str) -> None:
 def run(urls: list[str], desde: str, hasta: str, salida: str) -> None:
     rows: list[dict] = []
     captures: list[dict] = []
+    # El mismo plan suele aparecer en /planes/ y en la portada el mismo mes: se guarda solo la
+    # primera aparición (las URLs se recorren en orden, así que gana la primera página de la lista).
+    seen: set[tuple] = set()
+    n_duplicados = 0
     for url in urls:
         print(f"[CDX] {url}", file=sys.stderr)
         try:
@@ -459,6 +523,11 @@ def run(urls: list[str], desde: str, hasta: str, salida: str) -> None:
             captures.append(info)
             print(f"  {mes} {ts} -> {info['estado']} ({len(plans)})", file=sys.stderr)
             for p in plans:
+                key = (mes, p.precio_clp, p.datos_gb, p.datos_ilimitados)
+                if key in seen:
+                    n_duplicados += 1
+                    continue
+                seen.add(key)
                 d = asdict(p)
                 d.update(mes=mes, fecha_captura=f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}", pagina=original, wayback_url=wb_url)
                 rows.append(d)
@@ -466,7 +535,8 @@ def run(urls: list[str], desde: str, hasta: str, salida: str) -> None:
     rows.sort(key=lambda r: (r["mes"], r["pagina"], r.get("precio_clp") or 0))
     captures.sort(key=lambda c: (c["mes"], c["original"]))
     write_excel(rows, captures, salida)
-    print(f"\nListo: {len(rows)} filas de planes, {len(captures)} capturas -> {salida}", file=sys.stderr)
+    print(f"\nListo: {len(rows)} filas de planes ({n_duplicados} duplicados omitidos), "
+          f"{len(captures)} capturas -> {salida}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:

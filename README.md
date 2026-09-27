@@ -31,6 +31,7 @@ Las descargas se guardan en `.cache_wayback/`, así que si vuelve a correr el sc
 1. **API CDX** (`web.archive.org/cdx/search/cdx`) con `collapse=timestamp:6` y `filter=statuscode:200`, que devuelve la primera captura válida de cada mes (AAAAMM).
 2. Descarga el HTML original de cada captura (`/web/<timestamp>id_/<url>`, sin la barra de Wayback).
 3. Extracción heurística: busca "tarjetas" que tengan un precio (`$xx.xxx`) y una característica de plan (GB, minutos, "gigas libres"…). También revisa el JSON embebido (p. ej. `__NEXT_DATA__`) para las páginas que se renderizan con JavaScript.
+4. Filtros: descarta teléfonos, internet hogar/TV/telefonía fija, prepago/recargas y letra chica; ignora precios de equipos y cuotas; y guarda una sola fila si el mismo plan (mes, precio, GB) aparece en varias páginas. La columna *Advertencias* marca filas que conviene revisar.
 
 ## Contenido del Excel
 

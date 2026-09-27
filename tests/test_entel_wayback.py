@@ -51,6 +51,46 @@ def test_extract_json():
     assert all(p.metodo == "json" for p in plans)
 
 
+def test_plan_name_not_truncated():
+    # Antes el nombre salía "Plan 1" / "Plan 2"
+    p = ew.plan_from_text("Plan 18 GB $13.491 Precio normal $14.990 Habla hasta 450 min")
+    assert p.nombre == "Plan 18 GB"
+    p = ew.plan_from_text("Plan Controlado 25 GB Habla hasta 700 min $13.491")
+    assert p.nombre == "Plan Controlado 25 GB"
+    p = ew.plan_from_text("Contratando plan On Line $23.391 Minutos: Ilimitados Cuota de datos libres: 30 GB")
+    assert p.nombre == "Plan On Line"
+    p = ew.plan_from_text("Si tienes un plan desde $25.990 puedes navegar 30 GB")
+    assert p.nombre == "Plan 30 GB"
+
+
+def test_not_mobile_plans_are_skipped():
+    textos = [
+        "Xiaomi Redmi 12C 128GB 50% dcto. Navidad Conectada $ 99.990 Hasta 24 cuotas sin interés",
+        "APPLE iPhone 6s 16 GB Rose Gold Contratando Plan Multimedia cuota inicial desde $ 199.990 Ver ficha_",
+        "Entel Fibra 400Mb simétricos $12.990 /mes Por 6 meses, luego $20.990 Lo quiero",
+        "Nuevo Autopack de Internet Fijo Hogar 4G desde 30GB a sólo $17.990 mensuales",
+        "PLAN TELEFONÍA FIJA Minutos ilimitados a red fija Hasta 128 min. a móviles $ 6.800 Mensuales",
+        "Llévate 100 MB al recargar desde $2.500 (Vigencia MB de 3 días) Recarga aquí",
+        "Planes adicionales con 50% de descuento desde el segundo plan contratado y vigente con un plan "
+        "Controlado 100 GB de 21.990, Plan 130 GB de $25.990, que se encuentren bajo el mismo Rut",
+    ]
+    for t in textos:
+        assert ew.plan_from_text(t) is None, t
+
+
+def test_phone_prices_ignored():
+    t = ("Plan 18 GB Habla hasta 450 + 500 SMS Por 12 meses: $13.491 $14.990 desde el mes 13 "
+         "SAMSUNG GALAXY J5 2016 Precio venta $89.880 Llévatelo en 12 cuotas sin interés de $7.490")
+    p = ew.plan_from_text(t)
+    assert p.precio_clp == 13491 and p.precio_normal_clp == 14990
+
+
+def test_far_normal_price_discarded():
+    p = ew.plan_from_text("Plan Multimedia 600 MB $14.990 Habla 155 Min. Plan Full $39.990")
+    assert p.precio_clp == 14990 and p.precio_normal_clp is None
+    assert "precio normal descartado" in p.advertencias
+
+
 def test_end_to_end_excel(tmp_path, monkeypatch):
     from openpyxl import load_workbook
 
